@@ -1,1 +1,4 @@
+// Code for the mini project will go here
 
+
+#include <msp430.h>
