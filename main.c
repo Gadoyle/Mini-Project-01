@@ -13,6 +13,7 @@
 #define COMP2               BIT1        //P3.1 COMPARATOR FOR SHUNT RESISTOR LMOTORB
 #define COMP3               BIT2        //P3.2 COMPARATOR FOR SHUNT RESISTOR RMOTORF
 #define COMP4               BIT3        //P3.3 COMPARATOR FOR SHUNT RESISTOR RMOTORB
+#define LED                 BIT7        //P9.7 LED TO SIGNIFY DETECTED OC
 
 void straight(){                        //Go straight
     P2OUT = (LMOTORF + RMOTORF);
@@ -30,11 +31,11 @@ void cruise(){                          //soft stop
     P2OUT = 0;//(LMOTORF + LMOTORB + RMOTORF + RMOTORB);
 }
 
-unsigned volatile int MEM = 0; // remembers the previous drive mode
-unsigned volatile short countA=0;//the number that counts up in the PWM function
-unsigned const short PWM = BIT3;//the PWM output is used to set variables to stop. although this is a remenant from a previous version that used port interupts
-unsigned volatile short PWM_COUNTER = 6;//the default number that affects when the PWM is on or off
+unsigned volatile int MEM = 0; // state changer between straight/turn
+unsigned volatile short countA = 0;//the number that counts up in the PWM function, used for timing switch between straight/turn.
 unsigned int OC = 0; // log overcurrent occurances
+unsigned volatile int x = ; //SET TO VALUE REQUIRED TO TRAVEL 1 FOOT
+unsigned volatile int y = ; //SET TO VALUE REQUIRED TO TURN 90 DEG.
 
 
 void main(void)
@@ -45,17 +46,12 @@ void main(void)
     P2OUT &=~ (LMOTORF|LMOTORB|RMOTORF|RMOTORB);
     P2DIR |= (LMOTORF|LMOTORB|RMOTORF|RMOTORB);       //Motors initialized as outputs
 
-    //PWM and IR sensor setup
-    P3DIR |= PWM;
-    P3OUT &=~ PWM;
-	P3IFG =0;
-	
     // LButton settup
-	P1DIR &=~ BIT1;
-	P1REN |= BIT1;
-	P1OUT |= BIT1;
-	P1IE |= BIT1;
-	P1IES |= BIT1;
+	P1DIR &=~ (BIT1 + BIT2);
+	P1REN |= (BIT1 + BIT2);
+	P1OUT |= (BIT1 + BIT2);
+	P1IE |= (BIT1 + BIT2);
+	P1IES |= (BIT1 + BIT2);
 	P1IFG = 0;
     
     // Comparator settup
@@ -65,68 +61,52 @@ void main(void)
 	P3IE |= (BIT0 + BIT1 + BIT2 + BIT3);
 	P3IES |= (BIT0 + BIT1 + BIT2 + BIT3);
 	P3IFG = 0;
-
-    //Timer for distance
-    TA1CTL = TASSEL__SMCLK + TACLR + MC__STOP;
-    TA1CCTL0 |= CCIE;
-    TA1CCR0 = 1000; // SET UP TIME FOR TIMER IN ADVANCE
-
     
+    P9DIR |= LED; // initializes LED as output. No pullup/down resistor req.
+
     //PWM
-    TA2CTL = TASSEL__SMCLK  + TACLR + MC__STOP;
-    TA2CCTL0 |= CCIE;
-    TA2CCR0 = 1000;
+    TA2CTL = TASSEL__SMCLK + TBCLR + MC__STOP;      // PERIOD (SMCLK = 1MHz)
+    TA2CCTL0 |= CCIE; 
+    TA2CCR0 = 1000;                                 // DUTY CYCLE (1000/1MHz = 1ms, or 1kHz)
 
-
-
-
+    countA = 0;                                     //Insures that there is no inconsistencies in our distance/timing.
 
     __enable_interrupt();
     __no_operation();
-    //int scroll =0;
 
 	while(1){}
 }
 
 #pragma vector = PORT1_VECTOR//turns on other timers when lbtn is pressed, effectively starting the race
 __interrupt void MAXIMUMOVERDRIVE(void){
-    if(P1IFG = BIT1) {
+    if(P1IFG == BIT1) {
     TA1CTL |= MC__UP;
     TA2CTL |= MC__UP;
     P1IFG = 0;
-}   else if (P1IFG = BIT2) {
-    OC += OC;
-    
+}   else if (P1IFG == BIT2) {
+    OC++;
+    TA2CTL |= MC__UP;
+    P9OUT ^= LED;
 }
 }
 
 #pragma vector = PORT3_VECTOR
 __interrupt void OVERCURRENT(void){
-    
-}
+    TA2CTL |= MC__STOP;                             //Deactivates PWM, and therefor movement.
+    P9OUT ^= LED;                                   //Toggles LED on board to show OC detected.
+}  
 #pragma vector = TIMER2_A0_VECTOR //PWM timer / Driver code
 __interrupt void PWM_TIMER1(void) {
+    countA++;
 
-    if ((countA==PWM_COUNTER)){ // THE HIGHER PWM_COUNTER, THE SLOWER
-        P3OUT &=~ PWM;
-
-
-    }if(countA==9){// COUNTS TO THIS VALUE, THEN RESETS EXCLUDING THE COUNT UP INITIALLY
-        P3OUT |= PWM;
-        countA = 0;
-    }else{
-        countA++;
-    }
-
-    else if (/*(!(ctrl[0]))&&(!ctrl[1])&&(!(ctrl[2]))*/){ //SET THIS UP WITH TIMER IN ADVANCE, USE DIFFERENT VARIABLES FOR DISTANCE MEASUREMENT.
+    if (countA < x){ //go                      
         straight();
-        MEM = P2OUT;
-        PWM_COUNTER = 0;
-
-    }
-    }else  if (/*(!ctrl[0])&&(!ctrl[1])&&((ctrl[2]))*/){//hard right
+    } 
+    else  if ((MEM >= x) && (MEM < y)){ //turn
         hright();
-        MEM = P2OUT;
-        PWM_COUNTER = 4;
-
+    } 
+    else if (MEM >= y){ //stop
+        cruise();
+        TA2CTL |= MC__STOP;
+    }
 }
