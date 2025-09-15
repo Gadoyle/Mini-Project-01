@@ -97,15 +97,15 @@ __interrupt void OVERCURRENT(void){
 }  
 #pragma vector = TIMER2_A0_VECTOR //PWM timer / Driver code
 __interrupt void PWM_TIMER1(void) {
-    countA++;
+    countA++; //goes up every pulse to move motors and change states. One timer fits all.
 
-    if (countA < x){ //go                      
+    if (countA < x){ //go until x is reached                   
         straight();
     } 
-    else  if ((MEM >= x) && (MEM < y)){ //turn
+    else  if ((countA >= x) && (countA < y)){ //turn once countA is past X and stop once hits Y
         hright();
     } 
-    else if (MEM >= y){ //stop
+    else if (countA >= y){ //stop once countA hits or goes beyond Y due to clock jitter
         cruise();
         TA2CTL |= MC__STOP;
     }
