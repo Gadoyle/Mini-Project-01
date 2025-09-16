@@ -103,10 +103,11 @@ __interrupt void PWM_TIMER1(void) {
         straight();
     } 
     else  if ((countA >= x) && (countA < y)){ //turn once countA is past X and stop once hits Y
-        hright();
+        right();
     } 
     else if (countA >= y){ //stop once countA hits or goes beyond Y due to clock jitter
         cruise();
         TA2CTL |= MC__STOP;
     }
 }
+
