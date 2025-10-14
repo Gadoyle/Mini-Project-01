@@ -77,7 +77,8 @@ void main(void)
 	while(1){}
 }
 
-#pragma vector = PORT1_VECTOR//turns on other timers when lbtn is pressed, effectively starting the race
+//turns on other timers when lbtn is pressed, effectively starting the race
+#pragma vector = PORT1_VECTOR
 __interrupt void MAXIMUMOVERDRIVE(void){
     if(P1IFG == BIT1) {
     TA1CTL |= MC__UP;
@@ -110,4 +111,5 @@ __interrupt void PWM_TIMER1(void) {
         TA2CTL |= MC__STOP;
     }
 }
+
 
