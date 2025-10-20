@@ -1,98 +1,112 @@
-// rx_ir.c — MSP430FR6989 IR Receiver (TSOP38238 OUT on P1.4)
+// rx_uart_ir.c — MSP430FR6989 IR Receiver over UART (TSOP32238 → eUSCI_Ax RXD)
 #include <msp430.h>
+#include <stdint.h>
 
-#define TSOP_PIN            BIT4      // P1.4 input (active-LOW pulses)
-#define IR_THRESH_US_MID    880u      // midpoint between 0 (~0.6–0.76 ms) & 1 (~1.0–1.2 ms)
-#define IR_DEAD_LOW_US      850u      // reject ambiguous widths
-#define IR_DEAD_HIGH_US     910u
-#define IR_BIT_TIMEOUT_US   3000u     // parser reset if no edge > 3 ms
-#define IR_BITS_PER_FRAME   4         // demo: 4-bit payload
+#define USE_EUSCI_A0              1   // set to 0 if you switch to A1/A2
 
-volatile unsigned ir_low_us = 0;
-volatile unsigned ir_bitbuf = 0;
-volatile unsigned ir_bitcount = 0;
-volatile unsigned ir_frame_ready = 0;
-volatile unsigned ir_last_edge_time = 0;
+// Baud: 9600, 8N1, SMCLK = 16 MHz (easy, reliable combo)
+#define UART_BAUD_9600
 
-static inline void clocks_init_1MHz(void){
+static void clock_init_16mhz(void) {
+  // DCO = 16 MHz, SMCLK = 16 MHz
   CSCTL0_H = CSKEY_H;
-  CSCTL1   = DCOFSEL_0;                       // ~1 MHz
-  CSCTL2   = SELS__DCOCLK | SELM__DCOCLK;
-  CSCTL3   = DIVS__1 | DIVM__1;
+  CSCTL1   = DCOFSEL_4;                    // 16 MHz DCO
+  CSCTL2   = SELS__DCOCLK | SELM__DCOCLK | SELA__VLOCLK;
+  CSCTL3   = DIVS__1     | DIVM__1     | DIVA__1;
   CSCTL0_H = 0;
 }
 
-static inline void tsop_gpio_init(void){
-  PM5CTL0 &= ~LOCKLPM5;
-  P1DIR  &= ~TSOP_PIN;
-  P1REN  &= ~TSOP_PIN;      // TSOP drives strongly
-  P1IES  |=  TSOP_PIN;      // start on falling edge (HIGH->LOW)
-  P1IFG  &= ~TSOP_PIN;
-  P1IE   |=  TSOP_PIN;
+static void uart_pins_init(void) {
+  PM5CTL0 &= ~LOCKLPM5;                    // unlock GPIO (FRAM devices)
+
+#if USE_EUSCI_A0
+
+  P2DIR  &= ~BIT1;                         // P2.1 as input (RXD)
+  P2SEL0 |=  BIT1;
+  P2SEL1 &= ~BIT1;
+
+  // If you also wire TX for debugging (optional):
+  // P2DIR  |=  BIT0;                      // P2.0 as output (TXD)
+  // P2SEL0 |=  BIT0;
+  // P2SEL1 &= ~BIT0;
+
+#else
+  // eUSCI_A1 example
+  // Example: P3.4 = UCA1RXD
+  P3DIR  &= ~BIT4;
+  P3SEL0 |=  BIT4;
+  P3SEL1 &= ~BIT4;
+#endif
 }
 
-static inline void ta0_counter_init(void){
-  // TA0 as free-running counter @ ~1 MHz
-  TA0CTL = TASSEL__SMCLK | MC__CONTINUOUS | TACLR;
+static void uart_init_9600_SMCLK16MHz(void) {
+#if USE_EUSCI_A0
+  UCA0CTLW0 = UCSWRST;                     // hold USCI in reset
+  UCA0CTLW0 |= UCSSEL__SMCLK;              // SMCLK as BRCLK (16 MHz)
+
+  // 9600 bps @ 16 MHz with oversampling:
+  // N = 16,000,000 / 9600 ≈ 1666.6667
+  // BRW = 104, UCBRF = 2, UCOS16 = 1, UCBRS ≈ 0 (good enough for lab use)
+  UCA0BRW   = 104;
+  UCA0MCTLW = UCOS16 | UCBRF_2 | (0 << 8); // UCBRSx = 0
+
+  UCA0CTLW0 &= ~UCSWRST;                   // release reset
+  UCA0IE    |= UCRXIE;                     // enable RX interrupt
+#else
+  UCA1CTLW0 = UCSWRST;
+  UCA1CTLW0 |= UCSSEL__SMCLK;
+
+  UCA1BRW   = 104;
+  UCA1MCTLW = UCOS16 | UCBRF_2 | (0 << 8);
+
+  UCA1CTLW0 &= ~UCSWRST;
+  UCA1IE    |= UCRXIE;
+#endif
 }
 
-static inline void parser_reset(void){
-  ir_bitbuf = 0; ir_bitcount = 0; ir_frame_ready = 0;
+//Command dispatcher (maps 4-bit payload to actions)
+static inline void handle_cmd_4bit(uint8_t cmd4) {
+  switch (cmd4 & 0x0F) {
+    case 0x1: /* straight();   */ break; // 0001
+    case 0x2: /* right();      */ break; // 0010
+    case 0x4: /* left();       */ break; // 0100
+    case 0x8: /* backwards();  */ break; // 1000
+    case 0x9: /* armUp();      */ break; // 1001
+    case 0x6: /* armDown();    */ break; // 0110
+    default:  /* ignore / NOP  */ break;
+  }
 }
 
-static inline unsigned now_ticks(void){ return TA0R; }
-static inline int elapsed_gt(unsigned t0, unsigned limit){ return (unsigned)(now_ticks() - t0) > limit; }
-
-static inline void classify_and_push(unsigned width_us){
-  if (width_us > IR_DEAD_LOW_US && width_us < IR_DEAD_HIGH_US){ parser_reset(); return; }
-  unsigned bit = (width_us > IR_THRESH_US_MID) ? 1u : 0u;
-  ir_bitbuf = (ir_bitbuf << 1) | bit;
-  if (++ir_bitcount >= IR_BITS_PER_FRAME) ir_frame_ready = 1;
-}
-
-int main(void){
+int main(void) {
   WDTCTL = WDTPW | WDTHOLD;
-  clocks_init_1MHz();
-  tsop_gpio_init();
-  ta0_counter_init();
-  parser_reset();
-  ir_last_edge_time = now_ticks();
+
+  clock_init_16mhz();
+  uart_pins_init();
+  uart_init_9600_SMCLK16MHz();
+
   __enable_interrupt();
 
-  for(;;){
-    if (elapsed_gt(ir_last_edge_time, IR_BIT_TIMEOUT_US)) parser_reset();
-
-    if (ir_frame_ready){
-      __bic_SR_register(GIE);
-      unsigned payload4 = (ir_bitbuf & 0xF);
-      parser_reset();
-      __bis_SR_register(GIE);
-
-      // TODO: hook to your rover functions:
-      // if (payload4 == 0x1) straight();
-      // else if (payload4 == 0x2) right();
-      // else cruise();
-      (void)payload4;
-    }
+  for (;;) {
     __no_operation();
   }
 }
 
-// Port 1 ISR — TSOP edges
-#pragma vector=PORT1_VECTOR
-__interrupt void PORT1_ISR(void){
-  if (P1IFG & TSOP_PIN){
-    if (P1IES & TSOP_PIN){
-      // Falling edge (HIGH->LOW): burst start → zero counter
-      TA0R = 0;
-      P1IES &= ~TSOP_PIN;         // next look for rising edge
-    } else {
-      // Rising edge (LOW->HIGH): burst end → measure width
-      ir_low_us = TA0R;           // ~µs at 1 MHz
-      classify_and_push(ir_low_us);
-      P1IES |= TSOP_PIN;          // next falling edge
-    }
-    P1IFG &= ~TSOP_PIN;
-    ir_last_edge_time = now_ticks();
+// UART RX ISR 
+
+#if USE_EUSCI_A0
+#pragma vector=USCI_A0_VECTOR
+__interrupt void USCI_A0_ISR(void) {
+  if (UCA0IFG & UCRXIFG) {
+    uint8_t b = UCA0RXBUF;     // received byte from TSOP32238 → UART RXD
+    handle_cmd_4bit(b);        // use low nibble as your 4-bit command
   }
 }
+#else
+#pragma vector=USCI_A1_VECTOR
+__interrupt void USCI_A1_ISR(void) {
+  if (UCA1IFG & UCRXIFG) {
+    uint8_t b = UCA1RXBUF;
+    handle_cmd_4bit(b);
+  }
+}
+#endif
